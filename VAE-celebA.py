@@ -1,3 +1,4 @@
+# Code borrowed from: https://github.com/Jovana-Gentic/VAE_celeba/blob/main/pytorch-vae-celeba.ipynb
 import os
 import numpy as np
 import pandas as pd
@@ -62,18 +63,27 @@ DECODER_CONV_UNITS = [[256,256,(4,4),(1,1), ReLU],
                       [128,3*2,(4,4),(1,1), None]]
 
 def create_filepaths():
-    filenames = pd.read_csv('celeba-dataset/list_eval_partition.csv')
+    
+    filenames = pd.read_csv('/cs/cs153/datasets/celeb_a_dataset/list_eval_partition.csv')
 
     train_filenames = filenames[filenames['partition'] == 0]['image_id'].values
     val_filenames = filenames[filenames['partition'] == 1]['image_id'].values
 
-    path_to_files = 'celeba-dataset/img_align_celeba/img_align_celeba/'
+    # path_to_files = 'celeba-dataset/img_align_celeba/img_align_celeba/'
+    path_to_files = '/cs/cs153/datasets/celeb_a_dataset/img_align_celeba/'
+    # path_to_files = '/cs/cs153/projects/SSM/celeb_10/'
+
     train_filepaths = path_to_files + train_filenames
     val_filepaths = path_to_files+val_filenames
+
+    print("File path:", train_filepaths[0])
+    print("Exists?", os.path.exists(train_filepaths[0]))
+    print("File size (bytes):", os.path.getsize(train_filepaths[0]))
     
     return train_filepaths, val_filepaths
 
 train_filepaths, val_filepaths = create_filepaths()
+
 class CreateDataset(Dataset):
     
     def __init__(self, imgs):
@@ -142,6 +152,8 @@ def pad_inputs(inputs, kernel_size, stride):
     padding = torch.tensor((kernel_size[0] - stride[0]) / 2).to(device)
     return F.pad(inputs.to(device), (torch.ceil(padding).int(), torch.floor(padding).int()) * 2)
 
+# switch to the S4Model?
+# https://github.com/state-spaces/s4/blob/main/example.py
 class Conv2D(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride):
         super(Conv2D, self).__init__()
@@ -306,8 +318,8 @@ class VAEModel(nn.Module):
         return Normal(dec_mean, torch.exp(dec_logstd) * x_temp).sample()
 model = VAEModel()
 model = model.to(device)
-torchsummary.summary(model, (BATCH_SIZE, *INPUT_SHAPE), batch_dim=None, 
-                     col_names=("input_size", "output_size", "num_params"))
+# torchsummary.summary(model, (BATCH_SIZE, *INPUT_SHAPE), batch_dim=None,
+#                      col_names=("input_size", "output_size", "num_params"))
 MODEL_NAME = 'vae_celeba64_dense256'
 path = f'pytorch_checkpoints/{MODEL_NAME}'
 os.makedirs('pytorch_checkpoints', exist_ok=True)
@@ -466,7 +478,8 @@ lr_schedule = WarmupExponentialDecay(optimizer, decay_steps=DECAY_STEPS,
 
 results = {'nelbo':[],'rec':[],'kl':[],'val_nelbo':[],'val_rec':[],'val_kl':[]}
 start_time=time()
-train(train_dl,val_dl, results)
+# done training so commenting out the training function 
+# train(train_dl,val_dl, results)
 end_time=time()
 print(f'Total time for {TOTAL_TRAINING_STEPS} is {end_time-start_time:.2f}s')
 
@@ -489,7 +502,7 @@ axes[2].legend(loc="upper left")
 
 plt.tight_layout()
 fig.text(0., -0.05, 'First ever model', fontweight=900,fontsize=20)
-plt.savefig('First_model.png')
+plt.savefig('First_model_ananya_testing.png')
 plt.show()
 
 # choose the model to generate from
@@ -503,7 +516,7 @@ lr_schedule = WarmupExponentialDecay(optimizer, decay_steps=DECAY_STEPS,
                                    decay_rate=DECAY_RATE, warmup_steps=WARMUP_STEPS)
     
 _ = load_checkpoint()
-
+print("it reaches here! ")
 # Pick encoder distribution temperature (z_temp) and decoder distribution temperature (x_temp)
 # Generate from the prior
 pictures = model.generate(z_temp=1., x_temp=0.3).cpu()
@@ -515,4 +528,13 @@ for i, axes8 in enumerate(axes32):
         index = i * axes32.shape[1] + j
         ax.imshow(pictures[index].permute(1,2,0))
         ax.axis('off')
+plt.savefig('img_gen_testing.png')
+plt.show()
+
+# X axis parameter:
+xaxis = np.array([2, 8])
+# Y axis parameter:
+yaxis = np.array([4, 9])
+plt.plot(xaxis, yaxis)
+plt.savefig('save_fig_testing.png')
 plt.show()
