@@ -9,3 +9,11 @@ Afterwards, we also have a **VAE-losses.py** file which uses Pandas and Matplotl
 Lastly, we have **VAE-SSM.py**, which hosts the implementation code for the VAE-SSM hybrid model. 
 
 The CelebA dataset we used can be found here: https://www.kaggle.com/datasets/jessicali9530/celeba-dataset.
+
+# Using this repository
+0. [Optional] Create a virtual environment for this project (where you'll download all the necessary packages and dependencies) and set your Visual Studio Code environment up on a remote server which you can log into with an ssh key (training VAEs and SSMs are computationally expensive!).
+1. Save the files in this repository in your associated IDE - in particular, VAE-CelebA.py and VAE-SSM.py, which host the code for training and running the two models.
+2. Download the CelebA dataset from Kaggle onto your server or other coding environment: https://www.kaggle.com/datasets/jessicali9530/celeba-dataset
+3. Change the file paths for "" and ""
+4. In your terminal, after cd'ing into your folder with all of these files and the dataset, run "python VAE-CelebA.py" or "python VAE-SSM.py", depending on which model you want to train and run inference on.
+5. Enjoy the results and share!
