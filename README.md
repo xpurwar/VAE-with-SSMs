@@ -17,6 +17,7 @@ The CelebA dataset we used can be found here: https://www.kaggle.com/datasets/je
 3. Update the dataset file paths in VAE-CelebA.py. By default, `path_to_files` for the dataset is `/cs/cs153/datasets/celeb_a_dataset/img_align_celeba/` and for the .csv's is `/cs/cs153/datasets/celeb_a_dataset/list_eval_partition.csv`. You should replace these within the create_filepaths() function with the actual filepaths to where you downloaded and extracted the dataset. E.g., if you put the dataset inside of a folder called 'celeba', you should update those lines to sometihng like this:
 - filenames = pd.read_csv('celeba-dataset/list_eval_partition.csv') [currently line 74]
 - path_to_files = 'celeba-dataset/img_align_celeba/' [currently line 80]
+
 You should also ensure the CelebA dataset you download has those images in .jpeg or .jpg, which should be fine given that is the default of CelebA images.
 
 4. In your terminal, after cd'ing into your folder with all of these files and the dataset, run "python VAE-CelebA.py" or "python VAE-SSM.py", depending on which model you want to train and run inference on.
