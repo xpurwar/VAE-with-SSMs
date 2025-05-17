@@ -1,601 +1,381 @@
 import os
+import time
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from PIL import Image
-import tensorflow as tf
 
 import torch
-
-import torchsummary
-import torchvision as tv
-from torchvision import transforms, datasets
-from torchvision.transforms import v2
-
-from torch.utils.data import DataLoader, Dataset
-from torchvision.utils import make_grid
-
-from torch.distributions.normal import Normal
-import torch.nn.functional as F
-
-
 import torch.nn as nn
-from torch.nn import ReLU
+import torch.nn.functional as F
+from torch.distributions.normal import Normal
+from torch.utils.data import Dataset, DataLoader
+import torchvision as tv
+from torchvision import transforms
+from torchvision.utils import make_grid
+import tensorflow as tf  # for Progbar
 from torch.optim.lr_scheduler import _LRScheduler
-#from s4torch import S4Model
-from models.s4.s4 import S4Block as S4
+import pickle
+
+# importing from the Cartesia repo
 from models.s4.s4d import S4D
-from scipy import special as ss
-from time import time
 
-device = "cuda:0" if torch.cuda.is_available() else "cpu"
-torch.cuda.set_device(device) 
 
-# Data params
-INPUT_SHAPE = (3, 64, 64)
+# Hyperparameters
 
-# Training params
-BATCH_SIZE = 32
-TOTAL_TRAINING_STEPS = 200000
-EVAL_EVERY_N_STEPS = 2000
-VALIDATION_STEPS = 50
+INPUT_SHAPE          = (3, 64, 64)
+H, W                 = INPUT_SHAPE[1], INPUT_SHAPE[2]
+C                    = INPUT_SHAPE[0]
+LATENT_DIM           = 256
+D_MODEL              = 512
+N_LAYERS             = 4
+DROPOUT              = 0.1
 
-# Optimizer params
-INITIAL_LEARNING_RATE = 1e-3
-DECAY_STEPS = 50000
-DECAY_RATE = 0.5
-WARMUP_STEPS = 1000
+BATCH_SIZE           = 8
+TOTAL_TRAINING_STEPS = 20000
+EVAL_EVERY_N_STEPS   = 2000
+VALIDATION_STEPS     = 50
 
-# Model params
-ENCODER_CONV_UNITS = [[3,128,(4,4),(1,1), ReLU],   
-                      [128,128,(4,4),(2,2), ReLU],   
-                      [128,256,(4,4),(2,2), ReLU], 
-                      [256,256,(4,4),(2,2), ReLU], 
-                      [256,256,(4,4),(1,1), ReLU]]  
+INITIAL_LR           = 1e-3
+DECAY_STEPS          = 50000
+DECAY_RATE           = 0.5
+WARMUP_STEPS         = 1000
 
-ENCODER_DENSE_UNITS = [[256*8*8,256, ReLU], 
-                       [256,256 * 2, None]]
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-DECODER_DENSE_UNITS = [[256,256, ReLU], 
-                       [256,256 * 8 * 8, ReLU]]
 
-DECODER_CONV_UNITS = [[256,256,(4,4),(1,1), ReLU],
-                      [256,256,(4,4),(2,2), ReLU],
-                      [256,256,(4,4),(2,2), ReLU],
-                      [256,128,(4,4),(2,2), ReLU],
-                      [128,3*2,(4,4),(1,1), None]]
 
-def create_filepaths():
-    
-    filenames = pd.read_csv('/cs/cs153/datasets/celeb_a_dataset/list_eval_partition.csv')
-
-    train_filenames = filenames[filenames['partition'] == 0]['image_id'].values
-    val_filenames = filenames[filenames['partition'] == 1]['image_id'].values
-
-    # path_to_files = 'celeba-dataset/img_align_celeba/img_align_celeba/'
-    path_to_files = '/cs/cs153/datasets/celeb_a_dataset/img_align_celeba/'
-    # path_to_files = '/cs/cs153/projects/SSM/celeb_10/'
-
-    train_filepaths = path_to_files + train_filenames
-    val_filepaths = path_to_files+val_filenames
-
-    print("File path:", train_filepaths[0])
-    print("Exists?", os.path.exists(train_filepaths[0]))
-    print("File size (bytes):", os.path.getsize(train_filepaths[0]))
-    
-    return train_filepaths, val_filepaths
-
-train_filepaths, val_filepaths = create_filepaths()
+# Dataset + Dataloaders
 
 class CreateDataset(Dataset):
-    
-    def __init__(self, imgs):
-        self.imgs = imgs
-        
+    def __init__(self, filepaths):
+        self.filepaths = filepaths
+        self.transform = transforms.Compose([
+            transforms.Lambda(lambda p: tv.io.read_image(p).float()/255.),
+            transforms.Resize((80,80)),
+            transforms.CenterCrop((64,64)),
+        ])
+
     def __len__(self):
-        return len(self.imgs)
-    
-    def __getitem__(self, index):
-        image = self.imgs[index]
-        X = self.transform(image)
-        return X,X
-        
-    def transform(self, path):
-        img = tv.io.read_image(path)   
-        img = transforms.v2.functional.resized_crop(img, 40, 15, 148, 148, INPUT_SHAPE[1:], transforms.InterpolationMode.BILINEAR, True)/255.
-        return img
-def show_images(images, nmax=64):
-    fig, ax = plt.subplots(figsize=(8, 8))
-    ax.set_xticks([]); ax.set_yticks([])
-    ax.imshow(make_grid((images[0].detach()[:nmax]), nrow=8).permute(1, 2, 0))
-    
-def show_batch(dl, nmax=64):
-    for images in dl:
-        show_images(images, nmax)
-        break
-train_dataset = CreateDataset(train_filepaths)
-val_dataset = CreateDataset(val_filepaths)
-train_dl = DataLoader(train_dataset, 32, shuffle=True, pin_memory=True, num_workers=2) #num_workers=3
-val_dl = DataLoader(val_dataset, 32, shuffle=True, pin_memory=True, num_workers=2)
-fig,axes = plt.subplots(1,2)
-axes[0].imshow(tv.io.read_image(train_filepaths[0]).permute(1, 2, 0))
-axes[0].set_title('Before transformation',fontsize=20)
-axes[1].imshow(train_dataset.transform(train_filepaths[0]).permute(1,2,0))
+        return len(self.filepaths)
 
-axes[1].set_title('After transformation',fontsize=20)
-plt.tight_layout()
-plt.show()
-show_batch(train_dl, 32)
-# Define the shape of z based on hparams
-def z_shape():
-    return [BATCH_SIZE, ENCODER_DENSE_UNITS[-1][1] // 2]
+    def __getitem__(self, idx):
+        img = self.transform(self.filepaths[idx])
+        return img, img
 
-print(z_shape())
 
-class NelboLoss(nn.Module):
+def make_filepaths(csv_path, images_dir):
+    df        = pd.read_csv(csv_path)
+    train_ids = df[df['partition']==0]['image_id'].values
+    val_ids   = df[df['partition']==1]['image_id'].values
+    train_paths = [os.path.join(images_dir, i) for i in train_ids]
+    val_paths   = [os.path.join(images_dir, i) for i in val_ids]
+    return train_paths, val_paths
+
+
+train_paths, val_paths = make_filepaths(
+    '/cs/cs153/datasets/celeb_a_dataset/list_eval_partition.csv',
+    '/cs/cs153/datasets/celeb_a_dataset/img_align_celeba/'
+)
+train_dl = DataLoader(CreateDataset(train_paths), BATCH_SIZE, shuffle=True,
+                      pin_memory=True, num_workers=2)
+val_dl   = DataLoader(CreateDataset(val_paths),   BATCH_SIZE, shuffle=True,
+                      pin_memory=True, num_workers=2)
+
+
+
+# SSM‐based VAE
+
+class SSMEncoder(nn.Module):
     def __init__(self):
         super().__init__()
-        zeros = torch.zeros(z_shape()).to(device)
-        ones = torch.ones(z_shape()).to(device)
-        self.prior = Normal(zeros,ones) 
+        self.input_proj = nn.Conv2d(C, D_MODEL, kernel_size=1)
+        self.pos_emb    = nn.Parameter(torch.randn(1, H*W, D_MODEL))
+        self.s4_layers  = nn.ModuleList([S4D(D_MODEL, dropout=DROPOUT, transposed=True)
+                                         for _ in range(N_LAYERS)])
+        self.norms      = nn.ModuleList([nn.LayerNorm(D_MODEL) for _ in range(N_LAYERS)])
+        self.dropouts   = nn.ModuleList([nn.Dropout1d(DROPOUT) for _ in range(N_LAYERS)])
+        self.to_stats   = nn.Linear(D_MODEL, LATENT_DIM*2)
 
-    def __call__(self, dec_mean, dec_logstd,enc_mean,enc_logstd, targets,step):   
-        likelihood = Normal(dec_mean, torch.exp(torch.maximum(dec_logstd, torch.tensor(-10.).to(device)))).log_prob(targets.to(device))   
-        kl = torch.distributions.kl.kl_divergence(Normal(enc_mean,torch.exp(torch.maximum(enc_logstd,torch.tensor(-10.).to(device)))),self.prior) 
-        denominator = torch.prod(torch.tensor(likelihood.shape,dtype=torch.float32))
-        reconstuction_loss =-torch.sum(likelihood)/denominator
-        kl_loss = (torch.sum(kl)/denominator)*torch.minimum(torch.tensor(step, dtype=torch.float32).to(device)*1e-4,torch.tensor(1.).to(device))
-        neg_elbo = reconstuction_loss+kl_loss    # ()
-        return neg_elbo, reconstuction_loss, kl_loss
-    
-def pad_inputs(inputs, kernel_size, stride):
-    assert kernel_size[1] == kernel_size[0]
-    assert stride[1] == stride[0]
-    
-    padding = torch.tensor((kernel_size[0] - stride[0]) / 2).to(device)
-    return F.pad(inputs.to(device), (torch.ceil(padding).int(), torch.floor(padding).int()) * 2)
-
-# switch to the S4Model?
-# https://github.com/state-spaces/s4/blob/main/example.py
-class S4Model(nn.Module):
-
-    def __init__(
-        self,
-        d_input,
-        d_output=10,
-        d_model=256,
-        n_layers=4,
-        dropout=0.2,
-        prenorm=False,
-    ):
-        super().__init__()
-
-        self.prenorm = prenorm
-
-        # Linear encoder (d_input = 1 for grayscale and 3 for RGB)
-        self.encoder = nn.Linear(d_input, d_model)
-
-        # Stack S4 layers as residual blocks
-        self.s4_layers = nn.ModuleList()
-        self.norms = nn.ModuleList()
-        self.dropouts = nn.ModuleList()
-        for _ in range(n_layers):
-            self.s4_layers.append(
-                S4D(d_model, dropout=dropout, transposed=True, lr=min(0.001, args.lr))
-            )
-            self.norms.append(nn.LayerNorm(d_model))
-            self.dropouts.append(dropout_fn(dropout))
-
-        # Linear decoder
-        self.decoder = nn.Linear(d_model, d_output)
-        
-
-    def forward(self, inputs):
-        """
-        Input x is shape (B, L, d_input)
-        """
-        x = self.encoder(x)  # (B, L, d_input) -> (B, L, d_model)
-
-        x = x.transpose(-1, -2)  # (B, L, d_model) -> (B, d_model, L)
-        for layer, norm, dropout in zip(self.s4_layers, self.norms, self.dropouts):
-            # Each iteration of this loop will map (B, d_model, L) -> (B, d_model, L)
-
-            z = x
-            if self.prenorm:
-                # Prenorm
-                z = norm(z.transpose(-1, -2)).transpose(-1, -2)
-
-            # Apply S4 block: we ignore the state input and output
-            z, _ = layer(z)
-
-            # Dropout on the output of the S4 block
-            z = dropout(z)
-
-            # Residual connection
-            x = z + x
-
-            if not self.prenorm:
-                # Postnorm
-                x = norm(x.transpose(-1, -2)).transpose(-1, -2)
-
-        x = x.transpose(-1, -2)
-
-        # Pooling: average pooling over the sequence length
-        x = x.mean(dim=1)
-
-        # Decode the outputs
-        x = self.decoder(x)  # (B, d_model) -> (B, d_output)
-
-        return x
-# Define the unflatten shape used in the decoder based on hparams
-def unflatten_shape():
-    h, w = INPUT_SHAPE[1:]
-    for stride in ENCODER_CONV_UNITS:
-        h = h//stride[3][0]
-        w = w//stride[3][1]   
-    
-    assert DECODER_DENSE_UNITS[-1][1] % (h*w) == 0
-    unflatten_C = DECODER_DENSE_UNITS[-1][1] // (h*w)
-    x = (BATCH_SIZE, unflatten_C, h, w)
-    return x
-
-print(unflatten_shape())
-class EncoderConvs(nn.Module):
-    """
-    Encoder Block.
-
-    The Block is made of convolutions that downsample the image
-    resolution until a certain point, after which we flatten the image
-    and use a stack of Dense layers to get the posterior distribution q(z|x).
-    """
-    def __init__(self):     
-        super(EncoderConvs, self).__init__()
-        self.convs_list=[]        
-        for in_channels, out_channels, kernel_size, stride, activation in ENCODER_CONV_UNITS:            
-            self.convs_list.append(S4Model(in_channels, out_channels))
-            if activation is not None:
-                self.convs_list.append(activation())
-        self.convs_list = nn.ModuleList(self.convs_list)
-
-        self.dense_list = []
-        for in_channels, out_channels, activation in ENCODER_DENSE_UNITS:
-            self.dense_list.append(nn.Linear(in_channels, out_channels))
-            if activation is not None:
-                self.dense_list.append(activation())
-        self.dense_list = nn.ModuleList(self.dense_list)
-        
-        
-    def forward(self,x):
-        for conv in self.convs_list:
-            x = conv(x)
-
-        x = x.view(x.shape[0], -1)
-
-        for dense in self.dense_list:
-            x = dense(x)
-        return x  
-    
-class ResizeAndConv(nn.Module):
-    """
-    Resize-Conv Block.
-
-    A simple Nearest-Neighbord upsampling + Conv block, used to upsample images instead of Deconv layers.
-    This block is useful to avoid checkerboard artifacts: https://distill.pub/2016/deconv-checkerboard/
-    """
-    def __init__(self, in_channels, out_channels, kernel_size, stride):
-        super(ResizeAndConv,self).__init__()
-        self.stride = (float(stride[0]), float(stride[1]))
-        self.conv = S4Model(in_channels, out_channels)
-        
-        
     def forward(self, x):
-        if self.stride != 1:
-            x = F.interpolate(x, scale_factor=self.stride, mode='nearest')
-        x = self.conv(x)
-        return x
+        B = x.size(0)
+        x = self.input_proj(x)
+        x = x.flatten(2).transpose(1,2)
+        x = x + self.pos_emb
+        x = x.transpose(-1,-2)
+        for s4, ln, dp in zip(self.s4_layers, self.norms, self.dropouts):
+            z, _ = s4(x)
+            z    = dp(z)
+            x    = x + z
+            x    = ln(x.transpose(-1,-2)).transpose(-1,-2)
+        x = x.mean(-1)
+        stats = self.to_stats(x)
+        mu, log_sig = stats.chunk(2, dim=-1)
+        return mu, log_sig
 
-class DecoderConvs(nn.Module):
-    """
-    Decoder Block.
 
-    The Decoder block starts off with Dense layers to process the sample z,
-    followed by an unflatten (reshape) operation into an activation of shape (B, h, w, C).
-    The activation is then upsampled back to the original image size using a stack
-    of resize-conv blocks.
-    """
+class SSMDecoder(nn.Module):
     def __init__(self):
-        super(DecoderConvs, self).__init__()
-        self.convs_list=[]        
-        for in_channels, out_channels, kernel_size, stride, activation in DECODER_CONV_UNITS:            
-            self.convs_list.append(ResizeAndConv(in_channels, out_channels, kernel_size, stride))
-            if activation is not None:
-                self.convs_list.append(activation())
-        self.convs_list = nn.ModuleList(self.convs_list)
+        super().__init__()
+        self.latent_proj = nn.Linear(LATENT_DIM, D_MODEL)
+        self.pos_emb     = nn.Parameter(torch.randn(1, H*W, D_MODEL))
+        self.s4_layers   = nn.ModuleList([S4D(D_MODEL, dropout=DROPOUT, transposed=True)
+                                          for _ in range(N_LAYERS)])
+        self.norms       = nn.ModuleList([nn.LayerNorm(D_MODEL) for _ in range(N_LAYERS)])
+        self.dropouts    = nn.ModuleList([nn.Dropout1d(DROPOUT) for _ in range(N_LAYERS)])
+        self.to_pixels   = nn.Linear(D_MODEL, C*2)
 
-        self.dense_list = []
-        for in_channels, out_channels, activation in DECODER_DENSE_UNITS:
-            self.dense_list.append(nn.Linear(in_channels, out_channels))
-            if activation is not None:
-                self.dense_list.append(activation())
-        self.dense_list = nn.ModuleList(self.dense_list)
+    def forward(self, z):
+        B = z.size(0)
+        x = self.latent_proj(z)
+        x = x.unsqueeze(1).repeat(1, H*W, 1)
+        x = x + self.pos_emb
+        x = x.transpose(-1,-2)
+        for s4, ln, dp in zip(self.s4_layers, self.norms, self.dropouts):
+            z2, _ = s4(x)
+            z2    = dp(z2)
+            x     = x + z2
+            x     = ln(x.transpose(-1,-2)).transpose(-1,-2)
+        x     = x.transpose(-1,-2)
+        stats = self.to_pixels(x)
+        stats = stats.transpose(1,2).view(B, C*2, H, W)
+        mu, log_sig = stats.chunk(2, dim=1)
+        return mu, log_sig
 
-    def forward(self,x):
-        for dense in self.dense_list:
-            x = dense(x)
-
-        x = x.view(unflatten_shape())
-        
-        for conv in self.convs_list:
-            x = conv(x)
-        return x   
 
 class VAEModel(nn.Module):
-    """
-    VAE model.
+    def __init__(self):
+        super().__init__()
+        self.encoder = SSMEncoder()
+        self.decoder = SSMDecoder()
 
-    A simple Encoder-Decoder architecture where both Encoder and Decoder model multivariate
-    gaussian distributions.
-    """
-    def __init__(self):       
-        super(VAEModel, self).__init__()
-        self.encoder_convs = EncoderConvs()
-        self.decoder_convs = DecoderConvs()
-        
-           
-    def forward(self,inputs):
-        enc_mean, enc_logstd = self.encode(inputs)           # (B, z_C, 1, 1)
-
-        # Reparametrization trick (allow backprop)
-        epsilon = torch.randn(enc_mean.shape)
-        epsilon = epsilon.to(device)                         # (B, z_C, 1, 1)
-        z = epsilon*torch.exp(enc_logstd)+enc_mean           # (B, z_C, 1, 1)
-        
-        dec_mean, dec_logstd = self.decode(z)                # (B, 3, H, W)
+    def forward(self, x):
+        enc_mean, enc_logstd = self.encoder(x)
+        eps = torch.randn_like(enc_mean).to(device)
+        z   = enc_mean + torch.exp(enc_logstd) * eps
+        dec_mean, dec_logstd = self.decoder(z)
         return enc_mean, enc_logstd, dec_mean, dec_logstd
-    
-    def encode(self,inputs):
-        x = self.encoder_convs(inputs)   
-        enc_mean, enc_logstd = torch.chunk(x,2,1)
-        return enc_mean, enc_logstd
-    
-    def decode(self,z):
-        x = self.decoder_convs(z)  
-        dec_mean, dec_logstd = torch.chunk(x,2,1) 
-        return dec_mean, dec_logstd
-    
+
     def generate(self, z_temp=1., x_temp=1.):
-        """
-        Randomly sample z from the prior distribution N(0, 1) and generate the image x from z.
-
-        z_temp: float, defines the temperature multiplier of the encoder stddev. 
-            Smaller z_temp makes the generated samples less diverse and more generic
-        x_temp: float, defines the temperature multiplier of the decoder stddev.
-            Smaller x_temp makes the generated samples smoother, and loses small degree of information.
-        """
-        z = torch.randn(z_shape()).to(device)
-        z = z * z_temp
-        
-        dec_mean, dec_logstd = self.decode(z)
+        z = torch.randn(BATCH_SIZE, LATENT_DIM, device=device) * z_temp
+        dec_mean, dec_logstd = self.decoder(z)
         return Normal(dec_mean, torch.exp(dec_logstd) * x_temp).sample()
-model = VAEModel()
-model = model.to(device)
-# torchsummary.summary(model, (BATCH_SIZE, *INPUT_SHAPE), batch_dim=None,
-#                      col_names=("input_size", "output_size", "num_params"))
-MODEL_NAME = 'vae_celeba64_dense256'
-path = f'pytorch_checkpoints/{MODEL_NAME}'
-os.makedirs('pytorch_checkpoints', exist_ok=True)
 
-def save_checkpoint(step, model, optimizer):
-    torch.save({
-            'step': step,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'lr_schedule_state_dict': lr_schedule.state_dict(),
-            }, path)
 
-def load_checkpoint():
-    if os.path.exists(path):
-        ckpt = torch.load(path)
-        model.load_state_dict(ckpt['model_state_dict'])
-        optimizer.load_state_dict(ckpt['optimizer_state_dict'])
-        lr_schedule.load_state_dict(ckpt['lr_schedule_state_dict'])
-        step = ckpt['step']
-        print(f'Loaded checkpoint for step {step} from {path}')
-        
-    else:
-        step = 0
-        print(f"Didn't find checkpoint in {path}")
-    return step
-def plot_samples(tdec_mean, tdec_logstd, ttargets, vdec_mean, vdec_logstd, vtargets):
-    _, axes = plt.subplots(1,8,figsize=(8,4))
-    axes[0].imshow(ttargets[0].permute(1,2,0))
-    axes[1].imshow(Normal(tdec_mean[0].cpu(),torch.exp(tdec_logstd[0]).cpu()).sample().permute(1,2,0))
-    axes[2].imshow(ttargets[1].permute(1,2,0))
-    axes[3].imshow(Normal(tdec_mean[1].cpu(),torch.exp(tdec_logstd[1]).cpu()).sample().permute(1,2,0))
-    axes[4].imshow(vtargets[0].permute(1,2,0))
-    axes[5].imshow(Normal(vdec_mean[0].cpu(),torch.exp(vdec_logstd[0]).cpu()).sample().permute(1,2,0))
-    axes[6].imshow(vtargets[1].permute(1,2,0))
-    axes[7].imshow(Normal(vdec_mean[1].cpu(),torch.exp(vdec_logstd[1]).cpu()).sample().permute(1,2,0))
-    plt.tight_layout(pad=-2.)
-    for ax in axes:
-        ax.set_xticks([])
-        ax.set_yticks([])
-    plt.show() 
-    
-# Updates dictionary that stores changes in loss values
-def get_results(results, losses):
-    for i,key in enumerate(results.keys()):
-        results[key].append(losses[i])
+
+# Loss
+
+class NelboLoss(nn.Module):
+    def __init__(self, kl_slope: float = 1e-4, free_bits: float = 0.0):
+        super().__init__()
+        zeros = torch.zeros((BATCH_SIZE, LATENT_DIM), device=device)
+        ones  = torch.ones_like(zeros)
+        self.prior     = Normal(zeros, ones)
+        self.kl_slope  = kl_slope     # how fast to ramp KL
+        self.free_bits = free_bits    # minimum kl per sample in nats
+
+    def forward(self,
+                dec_mean, dec_logstd,
+                enc_mean, enc_logstd,
+                targets, step):
+        # reconstruction term
+        likelihood = Normal(
+            dec_mean,
+            torch.exp(torch.clamp(dec_logstd, min=-10.))
+        ).log_prob(targets)
+        rec_loss = -likelihood.sum() / likelihood.numel()
+
+        # KL term per dimension
+        q  = Normal(enc_mean, torch.exp(torch.clamp(enc_logstd, min=-10.)))
+        kl = torch.distributions.kl.kl_divergence(q, self.prior)  # shape [B, D]
+
+        # sum over latent dims → [B]
+        kl_per_sample = kl.sum(dim=1)
+
+
+        raw_kl = kl_per_sample.mean()  # scalar
+
+        # annealing weight
+        step_t    = torch.tensor(step, dtype=torch.float32, device=dec_mean.device)
+        kl_weight = torch.clamp(step_t * self.kl_slope, max=1.0)
+
+        kl_loss   = raw_kl * kl_weight
+
+        return rec_loss + kl_loss, rec_loss, kl_loss
+
+
+
+# Scheduler
 
 class WarmupExponentialDecay(_LRScheduler):
     def __init__(self, optimizer, decay_steps, decay_rate, warmup_steps=500,
                  last_epoch=-1, verbose=False):
         self.warmup_steps = warmup_steps
-        self.decay_steps = decay_steps
-        self.decay_rate = decay_rate
-
-        super(WarmupExponentialDecay, self).__init__(optimizer=optimizer, last_epoch=last_epoch, verbose=verbose)
+        self.decay_steps  = decay_steps
+        self.decay_rate   = decay_rate
+        super().__init__(optimizer=optimizer, last_epoch=last_epoch, verbose=verbose)
 
     def get_lr(self):
         if self.last_epoch <= self.warmup_steps:
-            lrs = [base_lr * np.minimum(self.last_epoch / self.warmup_steps, 1.) for 
-                   base_lr in self.base_lrs]
-            
-        else:
-            lrs = [base_lr * self.decay_rate ** ((self.last_epoch - self.warmup_steps) / self.decay_steps)
-                   for base_lr in self.base_lrs]
-        return lrs
+            return [base_lr * min(self.last_epoch / self.warmup_steps, 1.0)
+                    for base_lr in self.base_lrs]
+        return [base_lr * self.decay_rate ** ((self.last_epoch - self.warmup_steps) / self.decay_steps)
+                for base_lr in self.base_lrs]
 
-    def _get_closed_form_lr(self):
-        if self.last_epoch <= self.warmup_steps:
-            lrs = [base_lr * np.minimum(self.last_epoch / self.warmup_steps, 1.) for 
-                   base_lr in self.base_lrs]
-            
-        else:
-            lrs = [base_lr * self.decay_rate ** ((self.last_epoch - self.warmup_steps) / self.decay_steps)
-                   for base_lr in self.base_lrs]
-        return lrs
-def trainval_step(inputs, targets, steps, training=True):
-    """
-    Train/Val step based on the training argument.
-    """
+
+
+# Instantiating everything
+
+model       = VAEModel().to(device)
+optimizer   = torch.optim.Adamax(model.parameters(), lr=INITIAL_LR)
+lr_schedule = WarmupExponentialDecay(optimizer, DECAY_STEPS, DECAY_RATE, WARMUP_STEPS)
+loss        = NelboLoss()
+
+
+
+# Checkpoint helpers
+
+MODEL_NAME = 'vae_celeba64_dense256'
+path       = f'pytorch_checkpoints/{MODEL_NAME}'
+os.makedirs(os.path.dirname(path), exist_ok=True)
+
+def save_checkpoint(step, model, optimizer):
+    torch.save({
+        'step':                   step,
+        'model_state_dict':       model.state_dict(),
+        'optimizer_state_dict':   optimizer.state_dict(),
+        'lr_schedule_state_dict': lr_schedule.state_dict(),
+    }, path)
+
+def load_checkpoint():
+    if os.path.exists(path):
+        ckpt = torch.load(path, map_location=device)
+        model.load_state_dict(ckpt['model_state_dict'])
+        optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+        lr_schedule.load_state_dict(ckpt['lr_schedule_state_dict'])
+        print(f'Restored checkpoint at step {ckpt["step"]}')
+        return ckpt['step']
+    return 0
+
+
+# Training / Validation functions
+
+def trainval_step(inputs, targets, step, training=True):
     if training:
         model.train()
         optimizer.zero_grad()
-        enc_mean, enc_logstd, dec_mean, dec_logstd = model(inputs)
-        loss_value, reconstruction_loss, kl_loss = loss(dec_mean, dec_logstd, enc_mean, enc_logstd, targets, steps)
+        enc_m, enc_s, dec_m, dec_s = model(inputs)
+        loss_val, rec_l, kl_l    = loss(dec_m, dec_s, enc_m, enc_s, targets, step)
         with torch.no_grad():
-            loss_value.backward()
+            loss_val.backward()
             optimizer.step()
             lr_schedule.step()
-        return loss_value.item(), reconstruction_loss.item(), kl_loss.item()           
-
+        return loss_val.item(), rec_l.item(), kl_l.item()
     else:
         model.eval()
         with torch.no_grad():
-            enc_mean, enc_logstd, dec_mean, dec_logstd = model(inputs)
-            loss_value, reconstruction_loss, kl_loss = loss(dec_mean, dec_logstd, enc_mean, enc_logstd, targets, steps)
-            return loss_value.item(), reconstruction_loss.item(), kl_loss.item(), dec_mean, dec_logstd
-        
-def validate(dataset, steps):
-    """
-    Validation loop. 
-    """
-    avarage_loss = 0.
-    avarage_rec_loss = 0.
-    avarage_kl_loss = 0.
-   
-    for val_step,(inputs, targets) in zip(range(VALIDATION_STEPS), dataset):
-        loss_value,reconstuction_loss, kl_loss,dec_mean, dec_logstd = trainval_step(inputs, targets, torch.tensor(steps,dtype=torch.float32), training=False) 
-        avarage_loss += loss_value
-        avarage_rec_loss += reconstuction_loss
-        avarage_kl_loss += kl_loss
-           
-    avarage_loss /= (val_step + 1)
-    avarage_rec_loss /= (val_step + 1)
-    avarage_kl_loss /= (val_step + 1)   
-    return avarage_loss,avarage_rec_loss,avarage_kl_loss, dec_mean[:2], dec_logstd[:2], targets[:2]
+            enc_m, enc_s, dec_m, dec_s = model(inputs)
+            loss_val, rec_l, kl_l    = loss(dec_m, dec_s, enc_m, enc_s, targets, step)
+        return loss_val.item(), rec_l.item(), kl_l.item(), dec_m, dec_s
 
-def validate_and_plot(train_dl,val_dl,steps):
-    """
-    Validation function for both train and val data + metrics and artifacts logging.
-    """
-    avarage_train_loss,avarage_train_rec_loss,avarage_train_kl_loss,tdec_mean, tdec_logstd,ttargets= validate(train_dl, steps)    
-    avarage_val_loss,avarage_val_rec_loss,avarage_val_kl_loss,vdec_mean, vdec_logstd, vtargets = validate(val_dl, steps)
-    
-    print(f"\nsteps {steps}/{TOTAL_TRAINING_STEPS}  train_loss:  nelbo_{avarage_train_loss:.4f}  rec_{avarage_train_rec_loss:.4f} "  
-          f"kl_{avarage_train_kl_loss:.4f}      val_loss:  nelbo_{avarage_val_loss:.4f} "  
-          f"rec_{avarage_val_rec_loss:.4f}  kl_{avarage_val_kl_loss:.4f}")
-    plot_samples(tdec_mean, tdec_logstd, ttargets, vdec_mean, vdec_logstd, vtargets)  
-    print('')
-    return avarage_train_loss,avarage_train_rec_loss,avarage_train_kl_loss,avarage_val_loss,avarage_val_rec_loss,avarage_val_kl_loss
 
-def train(train_dl, val_dl, results):
-    """
-    Training loop
-    """
-    # Restore checkpoint
-    initial_step = load_checkpoint()
-    
-    pbar = tf.keras.utils.Progbar(EVAL_EVERY_N_STEPS, stateful_metrics=['nelbo','rec','kl'])
+def validate(dataset, step):
+    avg_loss, avg_rec, avg_kl = 0., 0., 0.
+    for i, (x, y) in zip(range(VALIDATION_STEPS), dataset):
+        lv, rl, kl, *_ = trainval_step(x.to(device), y.to(device), step, training=False)
+        avg_loss += lv; avg_rec += rl; avg_kl += kl
+    n = VALIDATION_STEPS
+    return avg_loss/n, avg_rec/n, avg_kl/n
 
-    for step, (train_inputs, train_targets) in zip(range(initial_step, TOTAL_TRAINING_STEPS+1),train_dl):
-        loss_value, reconstuction_loss, kl_loss = trainval_step(train_inputs.to(device), train_targets.to(device), torch.tensor(step), training=True) 
-        pbar.update(step % EVAL_EVERY_N_STEPS, [('nelbo', loss_value),('rec', reconstuction_loss),('kl', kl_loss)])
-        
-        if step % EVAL_EVERY_N_STEPS == 0:
-            losses = validate_and_plot(train_dl, val_dl, step)
-            # update the results dict with latest metrics
-            get_results(results, losses)   
 
-            # Save model checkpoint
-            save_checkpoint(step, model, optimizer)
-            print(f'SAVED CHECKPOINT FOR STEP {step}..')
+def validate_and_plot(train_dl, val_dl, step):
+    t_loss, t_rec, t_kl = validate(train_dl, step)
+    v_loss, v_rec, v_kl = validate(val_dl, step)
+    print(f"\nstep {step}/{TOTAL_TRAINING_STEPS}  train: nelbo={t_loss:.4f}, rec={t_rec:.4f}, kl={t_kl:.4f}  "
+          f"val: nelbo={v_loss:.4f}, rec={v_rec:.4f}, kl={v_kl:.4f}")
+    # (you can insert plot_samples here if you like)
 
-loss = NelboLoss()
-optimizer = torch.optim.Adamax(model.parameters(), lr=INITIAL_LEARNING_RATE)
-lr_schedule = WarmupExponentialDecay(optimizer, decay_steps=DECAY_STEPS, 
-                                   decay_rate=DECAY_RATE, warmup_steps=WARMUP_STEPS)
 
-results = {'nelbo':[],'rec':[],'kl':[],'val_nelbo':[],'val_rec':[],'val_kl':[]}
-start_time=time()
-# done training so commenting out the training function 
-# train(train_dl,val_dl, results)
-end_time=time()
-print(f'Total time for {TOTAL_TRAINING_STEPS} is {end_time-start_time:.2f}s')
 
-fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+# Training Loop
 
-axes[0].plot(results['nelbo'][1:], color='teal', label='nelbo')
-axes[0].plot(results['val_nelbo'][1:], color='orange', label='val_nelbo')
-axes[0].set_title('Nelbo loss', fontsize=20)
-axes[0].legend(loc="upper left")
+def train_loop():
+    step = load_checkpoint()
+    pbar = tf.keras.utils.Progbar(TOTAL_TRAINING_STEPS, stateful_metrics=['nelbo','rec','kl'])
+    results = {'nelbo':[], 'rec':[], 'kl':[]}
 
-axes[1].plot(results['rec'][1:], color='teal', label='rec')
-axes[1].plot(results['val_rec'][1:], color='orange', label='val_rec')
-axes[1].set_title('Reconstruction loss', fontsize=20)
-axes[1].legend(loc="upper left")
+    try:
+        for x, y in train_dl:
+            step += 1
+            if step == 50000:
+                loss.kl_slope  = 5e-5    # slow the KL‐ramp by a factor of two  
+                loss.free_bits = 0.1 
+            lv, rl, kl = trainval_step(x.to(device), y.to(device), step)
+            results['nelbo'].append(lv)
+            results['rec'].append(rl) 
+            results['kl'].append(kl)
+            pbar.update(step, [('nelbo', lv), ('rec', rl), ('kl', kl)])
 
-axes[2].plot(results['kl'][1:], color='teal', label='kl')
-axes[2].plot(results['val_kl'][1:], color='orange', label='val_kl')
-axes[2].set_title('KL loss', fontsize=20)
-axes[2].legend(loc="upper left")
+            if step % EVAL_EVERY_N_STEPS == 0:
+                validate_and_plot(train_dl, val_dl, step)
+                save_checkpoint(step, model, optimizer)
+                print(f'Saved checkpoint at step {step}')
 
-plt.tight_layout()
-fig.text(0., -0.05, 'First ever model', fontweight=900,fontsize=20)
-plt.savefig('First_model_ananya_testing.png')
-plt.show()
+            if step >= TOTAL_TRAINING_STEPS:
+                break
 
-# choose the model to generate from
-MODEL_NAME = 'vae_celeba64_dense256'
-path = f'pytorch_checkpoints/{MODEL_NAME}'
+    except Exception:
+        save_checkpoint(step, model, optimizer)
+        print(f' Interrupted at step {step}, checkpoint saved.')
+        raise
 
-model = VAEModel()
-model = model.to(device)
-optimizer = torch.optim.Adamax(model.parameters(), lr=INITIAL_LEARNING_RATE)
-lr_schedule = WarmupExponentialDecay(optimizer, decay_steps=DECAY_STEPS, 
-                                   decay_rate=DECAY_RATE, warmup_steps=WARMUP_STEPS)
-    
-_ = load_checkpoint()
-print("it reaches here! ")
-# Pick encoder distribution temperature (z_temp) and decoder distribution temperature (x_temp)
-# Generate from the prior
-pictures = model.generate(z_temp=1., x_temp=0.3).cpu()
+    with open('training_results.pkl','wb') as f:
+        pickle.dump(results, f)
+    return results
 
-# Plot grid of generated pictures
-fig, axes32 = plt.subplots(4,4, figsize=(10,10))
-for i, axes8 in enumerate(axes32):
-    for j, ax in enumerate(axes8):
-        index = i * axes32.shape[1] + j
-        ax.imshow(pictures[index].permute(1,2,0))
-        ax.axis('off')
-plt.savefig('img_gen_testing.png')
-plt.show()
 
-# X axis parameter:
-xaxis = np.array([2, 8])
-# Y axis parameter:
-yaxis = np.array([4, 9])
-plt.plot(xaxis, yaxis)
-plt.savefig('save_fig_testing.png')
-plt.show()
+# Putting it all together
+
+if __name__ == "__main__":
+    start = time.time()
+    results = train_loop()
+    end = time.time()
+    print(f"\nTotal training time: {end - start:.2f}s")
+
+    # Saving losses
+    with open('training_results.pkl', 'wb') as f:
+        pickle.dump(results, f)
+    print("Saved training_results.pkl")
+
+    # Plotting the losses
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+    # NELBO
+    axes[0].plot(results['nelbo'], label='train nelbo')
+    if 'val_nelbo' in results:
+        axes[0].plot(results['nelbo'],   label='val nelbo')
+    axes[0].set_title("NELBO Loss")
+    axes[0].legend()
+
+    # Reconstruction
+    axes[1].plot(results['rec'], label='train rec')
+    if 'rec' in results:
+        axes[1].plot(results['rec'],     label='val rec')
+    axes[1].set_title("Reconstruction Loss")
+    axes[1].legend()
+
+    # KL
+    axes[2].plot(results['kl'],  label='train kl')
+    if 'kl' in results:
+        axes[2].plot(results['kl'],      label='val kl')
+    axes[2].set_title("KL Loss")
+    axes[2].legend()
+
+    plt.tight_layout()
+    plt.savefig('loss_curves.png', bbox_inches='tight')
+    plt.show()
+
+
+
+
+
